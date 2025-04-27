@@ -1,0 +1,165 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#library(monocle)
+library(readxl)
+library(magrittr)
+library(dplyr)
+library(monocle3)
+library(ggplot2)
+```
+
+## Code for Monocle3 analysis
+
+```{r}
+# Read count matrix and meta data
+count <- read.csv('GSE104276_all_pfc_2394_UMI_TPM_NOERCC.xls',sep = '\t',header = T)
+meta <- read_excel('GSE104276_readme_sample_barcode.xlsx', sheet='SampleInfo')
+
+meta <- as.data.frame(meta)
+row.names(meta) <- meta[,1]
+meta[,1] <- NULL
+count <- count[, row.names(meta)]
+```
+
+```{r}
+p_data <- meta
+pre_cds  <- new_cell_data_set(as.matrix(count), cell_metadata = p_data, 
+  gene_metadata = data.frame(gene_short_name = row.names(count), row.names = row.names(count)))
+```
+
+```{r}
+cds <- preprocess_cds(pre_cds)
+```
+
+```{r}
+cds <- reduce_dimension(cds, preprocess_method = "PCA")
+head(cds@int_colData$reducedDims$UMAP)
+```
+
+```{r}
+plot_cells(cds, reduction_method="UMAP", 
+           show_trajectory_graph = FALSE,
+           label_cell_groups = FALSE, 
+           color_cells_by="cell_types",)
+```
+
+```{r}
+plot_cells(cds,reduction_method="UMAP",
+          group_cells_by = "week",
+          color_cells_by = "week",
+          label_groups_by_cluster=F,
+          label_leaves=F,
+          label_cell_groups=FALSE,
+          label_branch_points=FALSE, 
+          cell_size = 0.5,  group_label_size = 0)+xlab('')+ylab('')
+```
+
+```{r}
+cds <- cluster_cells(cds)
+cds <- learn_graph(cds)
+cds <- order_cells(cds) 
+```
+
+```{r}
+plot_cells(cds, color_cells_by = "pseudotime", 
+           label_cell_groups = TRUE, 
+           label_leaves = FALSE, 
+           cell_size = 0.5,
+           label_branch_points = TRUE)+ggtitle("Monocle3")+xlab('')+ylab('')
+```
+
+```{r}
+Track_genes <- graph_test(cds, neighbor_graph="principal_graph")
+Track_genes <- Track_genes[,c(5,2,3,4,1,6)] %>% 
+  dplyr::arrange(desc(morans_I),q_value)
+head(Track_genes)
+```
+
+```{r}
+plot_genes_in_pseudotime(cds['NEUROD6',] , 
+                         min_expr=0.5, color_cells_by = 'cell_types',
+                         trend_formula = "~ splines::ns(pseudotime, df=4)"
+                         )
+```
+
+```{r}
+plot_genes_in_pseudotime(cds['MAF',] , 
+                         min_expr=0.5, color_cells_by = 'week', 
+                         )
+```
+
+```{r}
+plot_cells(cds, genes='MAF',
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           cell_size=0.5,scale_to_range=FALSE, min_expr=0.5
+           )+xlab('')+ylab('')
+```
+
+## Code for Slingshot analysis
+
+```{r}
+sce <- SingleCellExperiment(assays = list(counts = as.matrix(count)),
+                 colData = DataFrame(meta),
+                 rowData = DataFrame(gene_short_name = row.names(count), row.names = row.names(count)))
+```
+
+```{r}
+geneFilter <- apply(assays(sce)$counts,1,function(x){
+    sum(x >= 3) >= 10
+})
+sce <- sce[geneFilter, ]
+```
+
+```{r}
+dim(sce)
+```
+
+```{r}
+FQnorm <- function(counts){
+    rk <- apply(counts,2,rank,ties.method='min')
+    counts.sort <- apply(counts,2,sort)
+    refdist <- apply(counts.sort,1,median)
+    norm <- apply(rk,2,function(r){ refdist[r] })
+    rownames(norm) <- rownames(counts)
+    return(norm)
+}
+assays(sce)$norm <- FQnorm(assays(sce)$counts)
+```
+
+```{r}
+pca <- prcomp(t(log1p(assays(sce)$norm)), scale. = FALSE)
+rd1 <- pca$x[,1:2]
+
+plot(rd1, col = rgb(0,0,0,.5), pch=16, asp = 1)
+```
+
+```{r}
+library('slingshot')
+```
+
+```{r}
+reducedDims(sce) <- SimpleList(PCA = rd1)
+```
+
+```{r}
+sce <- slingshot(sce, clusterLabels = 'cell_types', reducedDim = 'PCA')
+summary(sce$slingPseudotime_1)
+##    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+##   0.000   8.633  21.118  21.415  34.367  43.186
+```
+
+```{r}
+library('RColorBrewer')
+colors <- colorRampPalette(brewer.pal(11,'Spectral')[-6])(100)
+plotcol <- colors[cut(sce$slingPseudotime_1, breaks=100)]
+plot(reducedDims(sce)$PCA, col = plotcol, pch=16, asp = 1, legend = TRUE)
+legend('topright', legend = c('0%', '100%'), fill = colors[c(1,100)], bty = 'n', cex = 1.5)
+lines(SlingshotDataSet(sce), lwd=2, col='black')
+
+```
